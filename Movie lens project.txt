@@ -1,0 +1,7 @@
+Naive model
+Movie effect model
+Movie + User effect model
+Regularized Movie + User effect model
+Matrix Factorization using 'recosystem'
+-
+Release year model
