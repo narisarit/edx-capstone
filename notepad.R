@@ -18,11 +18,75 @@
 # 25 points: RMSE < 0.86490
 
 #------------------------------------------------------------------
+
 ## Introduction / Overview / Executive summary
 
 # This project uses a subset of the MovieLens 10M dataset provided in the `edx` object, which includes user ratings for movies along with metadata such as titles, genres, and timestamps. The goal is to build a recommendation system that minimizes the RMSE (Root Mean Squared Error) on a provided hold-out test set (`final_holdout_test`).
 
-# The dataset was preprocessed and cleaned by the course provider. Therefore, the analysis begins from the `edx` object, which is assumed to be ready for modeling.
+##########################################################
+# Create edx and final_holdout_test sets 
+##########################################################
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+options(timeout = 120)
+
+dl <- "ml-10M100K.zip"
+if(!file.exists(dl))
+  download.file("https://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings_file <- "ml-10M100K/ratings.dat"
+if(!file.exists(ratings_file))
+  unzip(dl, ratings_file)
+
+movies_file <- "ml-10M100K/movies.dat"
+if(!file.exists(movies_file))
+  unzip(dl, movies_file)
+
+ratings <- as.data.frame(str_split(read_lines(ratings_file), fixed("::"), simplify = TRUE),
+                         stringsAsFactors = FALSE)
+colnames(ratings) <- c("userId", "movieId", "rating", "timestamp")
+ratings <- ratings %>%
+  mutate(userId = as.integer(userId),
+         movieId = as.integer(movieId),
+         rating = as.numeric(rating),
+         timestamp = as.integer(timestamp))
+
+movies <- as.data.frame(str_split(read_lines(movies_file), fixed("::"), simplify = TRUE),
+                        stringsAsFactors = FALSE)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- movies %>%
+  mutate(movieId = as.integer(movieId))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Final hold-out test set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.6 or later
+# set.seed(1) # if using R 3.5 or earlier
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in final hold-out test set are also in edx set
+final_holdout_test <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from final hold-out test set back into edx set
+removed <- anti_join(temp, final_holdout_test)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
 
 # I need to get back to this section with key steps that were performed such as data cleaning, EDA, modeling, evaluation after I finish this project overall.
 
@@ -34,6 +98,7 @@ library(purrr)
 library(tidyverse)
 library(recosystem)
 library(lubridate)
+library(future.apply)
 # After implementing the codes provided, we get two data objects, 'edx' and 'final_holdout_test'
 # The latter is only for final assessment(RMSE calculation)
 # Let's simply look at 'edx''s structure
@@ -83,15 +148,15 @@ edx_test <- edx_test %>%
 # save objects locally(NOT for SUbMISSION)
 getwd()
 list.files()
-dir.exists("rda")
-list.files("rda")
-file.path("rda")
-saveRDS(edx, file = "rda/edx.rds")
-saveRDS(edx_train, file = "rda/edx_train.rds")
-saveRDS(edx_test, file = "rda/edx_test.rds")
-edx <- readRDS("rda/edx.rds")
-edx_train <- readRDS("rda/edx_train.rds")
-edx_test <- readRDS("rda/edx_test.rds")
+dir.exists("data")
+list.files("data")
+file.path("data")
+saveRDS(edx, file = "data/edx.rds")
+saveRDS(edx_train, file = "data/edx_train.rds")
+saveRDS(edx_test, file = "data/edx_test.rds")
+edx <- readRDS("data/edx.rds")
+edx_train <- readRDS("data/edx_train.rds")
+edx_test <- readRDS("data/edx_test.rds")
 
 # Now let's do Exploratory Data Analysis
 str(edx)
@@ -107,7 +172,7 @@ edx %>%
   ggplot(aes(x = rating)) +
   geom_bar() +
   labs(title = "Distribution of Movie Ratings", x = "Rating", y = "Count")
-# we could see the distribution of rating's is skewed to the left. And intergers are more frequent than .5s
+# we could see the distribution of rating's is skewed to the left. And whole numbers are more frequent than .5s
 
 # let's see ratings per user
 edx %>%
@@ -279,9 +344,12 @@ print(paste("Movie + User Effect RMSE:", round(rmse_user_movie, 5)))
 
 # Regularized model to prevent over-fitting on rare movies/users
 # Regularized Movie + User Effect Model
+plan(multisession, workers = parallel::detectCores() - 1) 
+options(future.globals.maxSize = 2 * 1024^3)
+
 lambdas <- seq(0, 10, 0.25)  # Try multiple lambda values
 
-rmse_results <- sapply(lambdas, function(lambda) {
+rmse_results <- future_sapply(lambdas, function(lambda) {
   mu <- mean(edx_train$rating)
   
   # Regularized movie effect
@@ -304,6 +372,7 @@ rmse_results <- sapply(lambdas, function(lambda) {
   
   return(RMSE(edx_test$rating, predicted_ratings))
 })
+plan(sequential)
 
 # Find best lambda
 best_lambda <- lambdas[which.min(rmse_results)]
@@ -316,6 +385,8 @@ print(paste("Regularized RMSE:", round(rmse_regularized_movie_user, 5)))
 
 # Let's try including timestamp to our model
 # Ensure date/year columns exist
+plan(multisession, workers = parallel::detectCores() - 1) 
+
 edx_train <- edx_train %>%
   mutate(rating_year = year(as_datetime(timestamp)))
 
@@ -326,7 +397,7 @@ edx_test <- edx_test %>%
 lambdas <- seq(0, 10, 0.25)
 
 # RMSE loop
-rmse_results <- sapply(lambdas, function(lambda) {
+rmse_results <- future_sapply(lambdas, function(lambda) {
   mu <- mean(edx_train$rating)
   
   # Regularized movie effect
@@ -357,6 +428,7 @@ rmse_results <- sapply(lambdas, function(lambda) {
   
   return(RMSE(edx_test$rating, predicted))
 })
+plan(sequential)
 
 # Best lambda
 best_lambda <- lambdas[which.min(rmse_results)]
@@ -392,18 +464,20 @@ train_data <- data_memory(user_index = edx_train_resid$userId,
                           item_index = edx_train_resid$movieId,
                           rating = edx_train_resid$residual)
 
-r <- Reco()
+r_hybrid <- Reco()
 
 # Tune
-opts <- r$tune(train_data, opts = list(dim = c(10, 20, 30), 
+opts <- r_hybrid$tune(train_data, opts = list(dim = c(10, 20, 30), 
                                        costp_l2 = c(0.01, 0.1),
                                        costq_l2 = c(0.01, 0.1),
                                        niter = 10))
-saveRDS(opts, file = "rda/opts.rds")
-opts <- readRDS(file = "rda/opts.rds")
+
+# saving object is NOT for submission
+saveRDS(opts, file = "data/opts.rds")
+opts <- readRDS(file = "data/opts.rds")
 
 # Train on residuals
-r$train(train_data, opts = c(opts$min, niter = 20))
+r_hybrid$train(train_data, opts = c(opts$min, niter = 20))
 
 # predict MF residuals on edx_test
 edx_test_mf <- edx_test %>%
@@ -415,7 +489,7 @@ test_data <- data_memory(user_index = edx_test_mf$userId,
                          item_index = edx_test_mf$movieId)
 
 # Predict residuals
-pred_resid <- r$predict(test_data, out_memory())
+pred_resid <- r_hybrid$predict(test_data, out_memory())
 
 # combine predictions
 edx_test_mf <- edx_test_mf %>%
@@ -425,3 +499,138 @@ edx_test_mf <- edx_test_mf %>%
 # Calculate RMSE
 rmse_hybrid <- RMSE(edx_test_mf$rating, edx_test_mf$pred_final)
 print(paste("Hybrid (Manual + MF residual) RMSE:", round(rmse_hybrid, 5)))
+# We got much lower RMSE (lower that 0.8)
+
+# The models we made is 'manual model' and 'manual + matrix factorization model'
+# Let's try 'matrix factorization only model'
+# Make sure userId and movieId are integers and matched
+train_data <- data_memory(
+  user_index = edx_train$userId,
+  item_index = edx_train$movieId,
+  rating = edx_train$rating
+)
+
+test_data <- data_memory(
+  user_index = edx_test$userId,
+  item_index = edx_test$movieId
+)
+
+r_mf_only <- Reco()
+
+opts_mf_only <- r_mf_only$tune(train_data, opts = list(
+  dim = c(10, 20, 30),
+  costp_l2 = c(0.01, 0.1),
+  costq_l2 = c(0.01, 0.1),
+  nthread = 2,
+  niter = 10
+))
+
+# saving object is NOT for submission
+saveRDS(opts_mf_only, file = "data/opts_mf_only.rds")
+opts_mf_only <- readRDS(file = "data/opts_mf_only.rds")
+
+r_mf_only$train(train_data, opts = c(opts_mf_only$min, niter = 20))
+
+pred <- r_mf_only$predict(test_data, out_memory())
+
+# Evaluate RMSE
+rmse_mf_only <- RMSE(edx_test$rating, pred)
+print(paste("Pure Matrix Factorization RMSE:", round(rmse_mf_only, 5)))
+# Surprisingly and also sadly pure matrix factorization model's RMSE was the lowest.
+
+# Results
+# Create RMSE comparison data frame
+rmse_results_df <- data.frame(
+  Model = c(
+    "Global Mean Only",
+    "Movie Effect",
+    "Movie + User Effect",
+    "Regularized Movie + User",
+    "Manual + MF Residual (Hybrid)",
+    "Pure Matrix Factorization"
+  ),
+  RMSE = c(
+    rmse_baseline,
+    rmse_movie,
+    rmse_user_movie,
+    rmse_regularized_movie_user,
+    rmse_hybrid,
+    rmse_mf_only
+  )
+)
+
+print(rmse_results_df)
+
+ggplot(rmse_results_df, aes(x = reorder(Model, RMSE), y = RMSE)) +
+  geom_col(fill = "steelblue") +
+  geom_text(aes(label = round(RMSE, 4)), vjust = -0.3, size = 3.5) +
+  labs(title = "RMSE Comparison by Model",
+       x = "Model Type", y = "RMSE") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+
+# Now let's test on final_holdout_test
+# Prepare final_holdout_test for hybrid prediction
+final_holdout_test_hybrid <- final_holdout_test %>%
+  left_join(b_i, by = "movieId") %>%
+  left_join(b_u, by = "userId") %>%
+  mutate(b_i = ifelse(is.na(b_i), 0, b_i),
+         b_u = ifelse(is.na(b_u), 0, b_u))
+
+# Create data for MF residual prediction
+final_mf_data <- data_memory(
+  user_index = final_holdout_test_hybrid$userId,
+  item_index = final_holdout_test_hybrid$movieId
+)
+
+# Predict MF residuals
+pred_resid_final <- r_hybrid$predict(final_mf_data, out_memory())
+
+# Combine manual and MF residual
+final_holdout_test_hybrid <- final_holdout_test_hybrid %>%
+  mutate(pred_manual = mu + b_i + b_u,
+         pred_final = pred_manual + pred_resid_final)
+
+# Compute RMSE
+rmse_hybrid_final <- RMSE(final_holdout_test_hybrid$rating, final_holdout_test_hybrid$pred_final)
+print(paste("Hybrid Model RMSE on final_holdout_test:", round(rmse_hybrid_final, 5)))
+
+
+# retrain Matrix factorization only model on full edx
+# Step 1: Create training set using full edx
+train_data_edx <- data_memory(
+  user_index = edx$userId,
+  item_index = edx$movieId,
+  rating = edx$rating
+)
+
+# Step 2: Initialize and tune
+r_final <- Reco()
+
+opts_final <- r_final$tune(train_data_edx, opts = list(
+  dim = c(10, 20, 30),
+  costp_l2 = c(0.01, 0.1),
+  costq_l2 = c(0.01, 0.1),
+  niter = 10,
+  nthread = 2
+))
+
+# Optional: save tuning results
+saveRDS(opts_final, file = "data/opts_final_edx.rds")
+
+# Step 3: Train using best options
+r_final$train(train_data_edx, opts = c(opts_final$min, niter = 20))
+
+# Prepare final_holdout_test for prediction
+final_data <- data_memory(
+  user_index = final_holdout_test$userId,
+  item_index = final_holdout_test$movieId
+)
+
+# Predict
+pred_final_mf <- r_final$predict(final_data, out_memory())
+
+# Evaluate RMSE
+rmse_final_mf <- RMSE(final_holdout_test$rating, pred_final_mf)
+print(paste("Pure Matrix Factorization RMSE on final_holdout_test:", round(rmse_final_mf, 5)))
+
